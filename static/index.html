@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>本地语音识别 · Local Speech-to-Text</title>
+  <meta name="description" content="基于本地开源模型的浏览器语音识别系统，支持中文普通话与英语。" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%234f46e5'/%3E%3Cpath d='M16 7a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0v-6a3 3 0 0 1 3-3Zm-6 8a6 6 0 0 0 12 0m-6 6v4' stroke='%23fff' stroke-width='2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/static/css/app.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand__mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32" width="30" height="30">
+          <rect width="32" height="32" rx="9" fill="#4f46e5" />
+          <path d="M16 7a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0v-6a3 3 0 0 1 3-3Zm-6 8a6 6 0 0 0 12 0m-6 6v4"
+                stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" />
+        </svg>
+      </div>
+      <div class="brand__text">
+        <h1>本地语音识别</h1>
+        <p>Local Speech-to-Text · faster-whisper · 中文普通话 / English</p>
+      </div>
+    </div>
+    <div class="header-badges">
+      <span class="badge" id="service-badge"><span class="badge__dot"></span>正在连接服务…</span>
+      <span class="badge" id="model-badge"><span class="badge__dot"></span>模型：—</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="column column--main">
+
+      <!-- 1. Language -->
+      <article class="card">
+        <div class="card__head">
+          <h2><span class="step">1</span>识别语言</h2>
+          <span class="card__hint">识别中文输出中文，识别英文输出英文，不做翻译</span>
+        </div>
+        <div class="segmented" id="language-group" role="radiogroup" aria-label="识别语言">
+          <button class="segmented__item is-active" type="button" data-language="zh" role="radio" aria-checked="true">
+            中文普通话
+          </button>
+          <button class="segmented__item" type="button" data-language="en" role="radio" aria-checked="false">
+            English
+          </button>
+          <button class="segmented__item" type="button" data-language="auto" role="radio" aria-checked="false">
+            自动检测 <span class="tag tag--bonus">加分</span>
+          </button>
+        </div>
+      </article>
+
+      <!-- 2. Recording -->
+      <article class="card">
+        <div class="card__head">
+          <h2><span class="step">2</span>麦克风录音</h2>
+          <span class="card__hint" id="record-limit">单次最长 60 秒</span>
+        </div>
+
+        <div class="segmented segmented--sub" id="mode-group" role="tablist" aria-label="识别模式">
+          <button class="segmented__item is-active" type="button" data-mode="batch" role="tab" aria-selected="true">
+            录音结束后识别
+          </button>
+          <button class="segmented__item" type="button" data-mode="stream" role="tab" aria-selected="false">
+            实时识别 <span class="tag tag--bonus">Bonus</span>
+          </button>
+        </div>
+
+        <div class="recorder">
+          <div class="recorder__indicator">
+            <span class="pulse" id="recording-dot" aria-hidden="true"></span>
+            <span id="record-status" class="recorder__state">等待开始</span>
+          </div>
+
+          <div class="timer" id="record-timer" aria-live="off">00:00.0</div>
+
+          <div class="level" aria-hidden="true">
+            <span class="level__bar" id="level-bar"></span>
+          </div>
+
+          <div class="recorder__actions">
+            <button class="btn btn--primary" id="record-button" type="button">
+              <span class="btn__icon" aria-hidden="true">●</span>开始录音
+            </button>
+            <button class="btn btn--danger" id="stop-button" type="button" disabled>
+              <span class="btn__icon" aria-hidden="true">■</span>结束录音
+            </button>
+          </div>
+          <p class="fineprint" id="mic-hint">首次使用请允许浏览器访问麦克风。建议使用 Chrome / Edge。</p>
+        </div>
+      </article>
+
+      <!-- 3. Upload -->
+      <article class="card">
+        <div class="card__head">
+          <h2><span class="step">3</span>上传音频文件</h2>
+          <span class="card__hint" id="upload-limit">支持 WAV / WebM / OGG / OPUS / MP3 / M4A / FLAC，最大 10 MB</span>
+        </div>
+
+        <div class="dropzone" id="drop-zone" tabindex="0" role="button"
+             aria-label="选择或拖放音频文件">
+          <p class="dropzone__title">把音频文件拖到这里，或点击选择文件</p>
+          <p class="dropzone__hint">浏览器录音使用的 WebM/Opus 与标准 WAV 均可</p>
+          <input type="file" id="file-input" class="visually-hidden"
+                 accept=".wav,.webm,.ogg,.oga,.opus,.mp3,.m4a,.mp4,.flac,audio/*" />
+        </div>
+
+        <div class="file-row" id="file-row" hidden>
+          <span class="file-row__name" id="file-name">—</span>
+          <span class="file-row__size" id="file-size"></span>
+          <button class="btn btn--ghost btn--small" id="file-clear" type="button">移除</button>
+          <button class="btn btn--primary btn--small" id="upload-button" type="button">上传并识别</button>
+        </div>
+
+        <div class="sample-row">
+          <span class="sample-row__label">没有麦克风？试试内置样本：</span>
+          <button class="chip" type="button" data-sample="chinese" data-sample-language="zh">中文样本</button>
+          <button class="chip" type="button" data-sample="english" data-sample-language="en">English sample</button>
+        </div>
+      </article>
+
+      <!-- 4. Result -->
+      <article class="card card--result">
+        <div class="card__head">
+          <h2><span class="step">4</span>识别结果</h2>
+          <span class="card__hint" id="result-hint">停止录音或上传文件后自动开始识别</span>
+        </div>
+
+        <div class="result-meta" id="result-meta">
+          <span>语言<strong id="meta-language">—</strong></span>
+          <span>音频时长<strong id="meta-duration">—</strong></span>
+          <span>处理耗时<strong id="meta-processing">—</strong></span>
+          <span>模型<strong id="meta-model">—</strong></span>
+        </div>
+
+        <textarea id="result-text" class="result-text" readonly
+                  placeholder="识别完成后，文字会显示在这里…" spellcheck="false"></textarea>
+
+        <div class="result-actions">
+          <button class="btn btn--secondary" id="copy-button" type="button" disabled>复制文本</button>
+          <button class="btn btn--ghost" id="clear-button" type="button">清空</button>
+          <span class="copy-feedback" id="copy-feedback" role="status"></span>
+        </div>
+      </article>
+    </section>
+
+    <aside class="column column--side">
+      <article class="card">
+        <div class="card__head"><h2>本次会话</h2></div>
+        <dl class="status-list">
+          <div><dt>状态</dt><dd id="status-state">空闲</dd></div>
+          <div><dt>识别语言</dt><dd id="status-language">中文普通话</dd></div>
+          <div><dt>音频时长</dt><dd id="status-duration">—</dd></div>
+          <div><dt>识别耗时</dt><dd id="status-processing">—</dd></div>
+          <div><dt>音频格式</dt><dd id="status-source">—</dd></div>
+          <div><dt>模型</dt><dd id="status-model">—</dd></div>
+          <div><dt>推理设备</dt><dd id="status-device">—</dd></div>
+        </dl>
+        <div class="progress" id="progress-track" hidden><span class="progress__bar" id="progress-bar"></span></div>
+      </article>
+
+      <article class="card" id="alert-card" hidden>
+        <div class="alert" id="alert-box">
+          <p class="alert__title" id="alert-title">出错了</p>
+          <p class="alert__detail" id="alert-detail"></p>
+          <p class="alert__raw" id="alert-raw" hidden></p>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card__head"><h2>说明</h2></div>
+        <ul class="tips">
+          <li>音频全部在本机处理，模型推理在本地运行，不上传云端。</li>
+          <li>实时识别按约 <span id="tip-chunk">2.5</span> 秒切片发送到后端；停止后会对整段音频再复核一次，生成最终文本。</li>
+          <li>录音上限 <span id="tip-limit">60</span> 秒；文件上限 <span id="tip-file-limit">10 MB</span>。</li>
+          <li>识别接口：<code>POST /api/transcribe</code>，健康检查：<code>GET /health</code>。</li>
+        </ul>
+      </article>
+    </aside>
+  </main>
+
+  <footer class="app-footer">
+    <span>本地开源 ASR · 无需联网推理 · CPU 可用</span>
+    <span id="footer-version"></span>
+  </footer>
+
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>
