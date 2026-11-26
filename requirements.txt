@@ -1,0 +1,26 @@
+# Runtime + test dependencies for the local speech-to-text service.
+#
+# Verified on: Windows 11 x64, Python 3.12.13, CPU-only (AMD Ryzen 5 5600U, 16 GB RAM).
+# Install with: python -m pip install -r requirements.txt
+#
+# Everything here ships as a pure pip wheel: no Docker, no Node.js, no database,
+# no CUDA, no compiler and no separately installed ffmpeg binary.
+
+# --- web layer -----------------------------------------------------------
+fastapi==0.165.0
+starlette==1.10.0
+uvicorn[standard]==0.54.0
+python-multipart==0.0.34
+
+# --- local ASR (CTranslate2 + bundled FFmpeg decoder) --------------------
+faster-whisper==1.2.1
+ctranslate2==4.9.1
+av==19.0.2
+huggingface-hub==2.4.0
+numpy==2.5.5
+
+# --- test tooling --------------------------------------------------------
+# Kept in this file on purpose: the assessment requires `python -m pytest -q`
+# to work after the single documented install command.
+pytest==9.2.0
+httpx==0.28.1

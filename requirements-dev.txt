@@ -1,0 +1,10 @@
+# Optional development-only dependencies (not required to run the app or pytest).
+#
+#   python -m pip install -r requirements-dev.txt
+#   python -m playwright install chromium
+#
+# These are used by scripts/e2e_browser_check.py, which drives the real web UI
+# with a fake microphone to verify the browser flows end to end.
+
+-r requirements.txt
+playwright==1.65.2

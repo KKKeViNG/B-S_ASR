@@ -1,0 +1,16 @@
+[project]
+name = "local-speech-to-text"
+version = "1.0.0"
+description = "CPU-friendly local speech-to-text web application (FastAPI + faster-whisper)"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "real_model: requires the real local ASR model; skipped unless --run-real-model is passed",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
