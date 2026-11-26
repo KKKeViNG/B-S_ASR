@@ -1,0 +1,5 @@
+# Reference transcripts for the bundled audio samples.
+# Format: <file>\t<human transcript>
+# Generated locally with Windows SAPI (zh-CN Huihui / en-US Zira).
+chinese.wav	你好，欢迎使用本地语音识别系统。今天天气很好，我们一起出去散步吧。
+english.wav	Hello and welcome to the local speech recognition system. The weather is nice today, so let's go for a walk.
