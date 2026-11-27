@@ -23,6 +23,10 @@ uploads/
 logs/
 *.log
 
+# ---- Assessment brief and delivery documents: local only, never published ----
+/task.md
+/docs/
+
 # ---- Editors / OS ----
 .idea/
 .vscode/
