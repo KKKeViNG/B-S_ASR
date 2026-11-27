@@ -6,6 +6,9 @@
 - **CPU 可用**：默认 `int8` + `cpu`，无需 NVIDIA GPU / CUDA。
 - **单条安装命令**：`python -m pip install -r requirements.txt`，无 Docker、Node.js、数据库等外部依赖。
 - **必做功能 F1–F5 全部实现**，并实现加分项 **F6 实时语音识别**（WebSocket + 音频分片）。
+- **模型可热切换**：页面内选择 `tiny / base / small / medium / large-v3-turbo`，带下载进度，无需重启服务。
+- **结果可播放、可导出**：识别结果附带分段与时间戳，音频播放器可点击跳转，支持导出 TXT / SRT / VTT。
+- **稳健性**：每请求推理超时（504）、可配置备用模型降级、统一错误体带 `stage` / `retryable`。
 
 ---
 
@@ -78,7 +81,19 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 ## 4. 使用说明
 
-### 4.1 麦克风录音（F1）
+### 4.1 选择识别模型（可选）
+
+「识别模型」卡片列出本地支持的档位（`tiny / base / small / medium / large-v3-turbo / large-v3`），
+显示参数量、下载体积、是否已缓存以及推荐档位。选择后点击 **应用并加载**：
+
+- 已下载的档位：立即切换（下一次识别生效），无需重启服务；
+- 未下载的档位：自动下载并加载，进度条与已下载/总大小实时显示；
+- 选择结果持久化在 `models/state.json`，重启后仍然生效。
+
+准确率与速度的折中：`small` 是默认；想明显提升中文效果可用 `large-v3-turbo`（CPU 上约慢 2–3 倍），
+低配机器可用 `base`。
+
+### 4.2 麦克风录音（F1）
 
 1. 选择识别语言（中文普通话 / English / 自动检测）。
 2. 点击 **开始录音**，页面显示录音状态、计时器与实时音量条。
@@ -86,18 +101,18 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 4. 单次录音最长 60 秒：计时到 60 秒会自动停止并立即识别。
 5. 识别完成后可直接 **复制文本**，并可以再次录音。
 
-### 4.2 上传音频（F2）
+### 4.3 上传音频（F2）
 
 - 支持格式：`WAV / WebM / OGG / OPUS / MP3 / M4A / FLAC`（覆盖 WAV 必做格式与浏览器录音的 WebM/Opus）。
 - 支持拖拽或点击选择，单文件上限 10 MB，与麦克风录音共用同一套后端识别逻辑。
 - 校验失败（空文件、损坏文件、超限、格式不支持）会在页面给出明确提示。
 
-### 4.3 内置样本（无需麦克风）
+### 4.4 内置样本（无需麦克风）
 
 页面「上传音频文件」卡片下有 **中文样本 / English sample** 两个按钮，直接点击即可体验完整识别链路，
 样本文件位于 `samples/`。
 
-### 4.4 实时识别（F6，加分项）
+### 4.5 实时识别（F6，加分项）
 
 切换到「实时识别」，点击 **开始实时识别** 后持续说话：
 
@@ -106,6 +121,15 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 - 点击 **停止并输出结果**：先返回分片拼接结果，前端随即把整段音频重发一次（`refine`），
   后端对整段音频复核，得到与一次性识别同样干净的最终文本；
 - 采用「一次只发一片」的流控，CPU 较慢时不会堆积无界任务队列。
+
+### 4.6 结果播放、分段与导出
+
+识别完成后：
+
+- 结果区出现音频播放器（麦克风录音与上传文件均可用），点击分段列表左侧时间即可跳转播放；
+- 播放时当前分段会高亮；
+- **导出 TXT / SRT / VTT** 使用服务端格式化接口，不重复推理；
+- 勾选「词级时间戳」可让接口返回每个词的时间（约慢 2 倍，适合精细字幕）。
 
 ## 5. 接口
 
@@ -121,7 +145,8 @@ curl -s http://127.0.0.1:8000/health
 
 ### 5.2 `POST /api/transcribe`
 
-`multipart/form-data`，字段 `file`（音频）与 `language`（`zh` / `en`，额外支持 `auto`）。
+`multipart/form-data`，字段 `file`（音频）与 `language`（`zh` / `en`，额外支持 `auto`），
+可选 `word_timestamps=true` 请求词级时间戳。
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/api/transcribe ^
@@ -137,9 +162,17 @@ curl -s -X POST http://127.0.0.1:8000/api/transcribe ^
   "processing_seconds": 3.913,
   "detected_language": "zh",
   "language_probability": 1.0,
-  "segments": [{ "start": 0.0, "end": 4.1, "text": "你好,欢迎使用本地语音识别系统。" }],
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 4.1,
+      "text": "你好,欢迎使用本地语音识别系统。",
+      "words": [{ "word": "你好,", "start": 0.0, "end": 0.5, "probability": 0.92 }]
+    }
+  ],
   "model": "faster-whisper/small",
-  "warning": null
+  "warning": null,
+  "truncated": false
 }
 ```
 
@@ -147,6 +180,8 @@ curl -s -X POST http://127.0.0.1:8000/api/transcribe ^
 - `language`：本次请求选择的语言；`auto` 模式下返回检测结果。
 - `duration_seconds`：音频实际时长（服务端解码后计算，16 kHz 重采样）。
 - `processing_seconds`：服务端处理耗时（解码 + 推理），不含首次模型下载。
+- `segments[].words`：词级时间戳（仅当开启 `word_timestamps` 时非空）。
+- `warning`：`degraded_model` / `deadline_exceeded` / `no_speech_detected` 的组合，正常为 `null`。
 - 其余字段为增量信息，不影响必做契约。
 
 ### 5.3 其他接口
@@ -155,7 +190,11 @@ curl -s -X POST http://127.0.0.1:8000/api/transcribe ^
 | --- | --- | --- |
 | GET | `/` | Web 页面 |
 | GET | `/api/config` | 前端所需的限制与模型信息 |
-| GET | `/api/model` | 模型状态（是否已加载、设备、耗时） |
+| GET | `/api/model` | 当前模型状态（是否已加载、设备、是否已下载） |
+| GET | `/api/models` | 模型目录（档位、体积、许可、是否已缓存） |
+| POST | `/api/models/select` | 选择并持久化模型（`{"model":"large-v3-turbo"}`） |
+| GET | `/api/models/{id}/download` | 下载/预热模型并以 SSE 推送进度 |
+| POST | `/api/subtitles` | 用分段生成 SRT / VTT / TXT（不重复推理） |
 | WS | `/ws/stream` | 实时识别（加分项） |
 | GET | `/docs` | 自动生成的 OpenAPI 文档 |
 
@@ -175,8 +214,15 @@ WebSocket 协议（详见 `app/streaming.py` 文档字符串）：
 所有 4xx / 5xx 都返回统一 JSON：
 
 ```json
-{ "code": "unsupported_format", "detail": "Unsupported audio format '.txt'. Supported formats: ..." }
+{
+  "code": "unsupported_format",
+  "detail": "Unsupported audio format '.txt'. Supported formats: ...",
+  "stage": "request",
+  "retryable": false
+}
 ```
+
+`stage` 取值 `request / decode / model / inference / server`；`retryable` 表示客户端是否可以原样重试。
 
 | HTTP | `code` | 触发场景 |
 | --- | --- | --- |
@@ -189,6 +235,7 @@ WebSocket 协议（详见 `app/streaming.py` 文档字符串）：
 | 500 | `transcription_failed` | 推理失败 |
 | 500 | `internal_error` | 未预期的服务端异常 |
 | 503 | `model_unavailable` | 模型加载失败（权重缺失、后端不可用） |
+| 504 | `timeout` | 超过本请求的推理时限（可重试或换更小模型） |
 
 ## 6. 测试
 
@@ -213,6 +260,9 @@ python scripts/e2e_browser_check.py
 | 音频处理 | `tests/test_audio.py` | WAV/WebM/Opus 解码、重采样、空/损坏文件、时长上限 |
 | 语言参数 | `tests/test_language.py` | 中英文、别名、非法语言、`auto` |
 | 模型集成 | `tests/test_model_integration.py` | 懒加载、参数传递、结果映射、异常翻译、并发串行化 |
+| 模型管理 | `tests/test_models.py` | 目录元数据、下载缓存识别、选择持久化、SSE 下载流、失败事件 |
+| 字幕格式 | `tests/test_subtitles.py` | SRT/VTT 时间码与编号、空分段、格式校验、附件下载 |
+| 超时/降级 | `tests/test_timeout_fallback.py` | 504、部分结果、备用模型降级、错误 `stage`/`retryable` |
 | 错误处理 | `tests/test_errors.py` | 415/413/422/500/503 与错误体一致性 |
 | 前后端流程 | `tests/test_frontend_flow.py`、`tests/test_streaming.py` | 页面契约、上传流程、WebSocket 分片识别 |
 | 样本校验 | `tests/test_samples.py` | 样本存在、5–15 秒、16 kHz 单声道、参考文本 |
@@ -221,7 +271,8 @@ python scripts/e2e_browser_check.py
 当前结果（详见随源码包单独提交的 `test-report.md`）：
 
 ```
-102 passed, 5 skipped in 2.54s          # python -m pytest -q
+102 passed, 5 skipped in 2.54s          # python -m pytest -q（旧版记录）
+131 passed, 5 skipped in 3.32s          # 当前版本（新增模型/字幕/超时用例）
 5 passed in 35.04s                      # --run-real-model
 ```
 ### 测试音频
@@ -247,6 +298,9 @@ python scripts/e2e_browser_check.py
 | `STT_COMPUTE_TYPE` | `int8` | `int8` / `float32` / `float16`（后者需 GPU） |
 | `STT_BEAM_SIZE` | `5` | 解码 beam 大小（越大越准、越慢） |
 | `STT_PRELOAD` | `1` | 权重已缓存时在启动阶段后台预加载模型，首次请求不再等待加载 |
+| `STT_WORD_TIMESTAMPS` | `0` | 是否默认返回词级时间戳（约慢 2 倍，也可在页面勾选） |
+| `STT_REQUEST_TIMEOUT_SECONDS` | `0` | 单请求推理时限；`0` 表示按音频时长自动计算（4×时长+15 秒，15–600 秒） |
+| `STT_FALLBACK_MODEL` | 空 | 推理失败时自动降级一次的备用档位（如 `base`），需该模型已缓存或允许下载 |
 | `STT_OFFLINE` | `0` | 设为 `1` 时只使用本地缓存，不访问网络 |
 | `STT_MAX_UPLOAD_BYTES` | `10485760` | 上传上限（10 MB） |
 | `STT_MAX_AUDIO_SECONDS` | `120` | 服务端允许的最长音频（上传） |
@@ -260,28 +314,32 @@ python scripts/e2e_browser_check.py
 
 ```
 app/
-  main.py            FastAPI 应用工厂、路由（/health、/api/transcribe、/api/config、/api/model、/ws/stream）
+  main.py            FastAPI 应用工厂、路由（/health、/api/transcribe、/api/models、/api/subtitles、/ws/stream）
   config.py          环境变量配置（Settings）
   audio.py           格式嗅探、上传校验、PyAV 解码 + 16 kHz 重采样、WAV 编码
+  models.py          模型目录、缓存识别、选择持久化、SSE 下载进度
+  subtitles.py       SRT / VTT / TXT 格式化
+  serializers.py     引擎结果 → API 负载（REST 与 WebSocket 共用）
   asr/
-    base.py          ASREngine 协议、TranscriptionResult
-    whisper_engine.py faster-whisper 懒加载、加锁推理、异常翻译
+    base.py          ASREngine 协议、TranscriptionResult（含词级时间戳）
+    whisper_engine.py faster-whisper 懒加载、模型热切换、加锁推理、异常翻译
   streaming.py       WebSocket 实时识别会话
-  errors.py          统一错误类型与 JSON 错误处理
+  errors.py          统一错误类型（code/stage/retryable）与 JSON 错误处理
   schemas.py         Pydantic 响应模型
 static/
   index.html         单页界面
   css/app.css        样式（无构建步骤）
-  js/app.js          页面状态机与交互
+  js/app.js          页面状态机、模型切换、播放器/分段/导出
   js/recorder.js     MediaRecorder 录音、音量条、60 秒上限
   js/streaming.js    实时识别（AudioWorklet + WebSocket 流控）
   js/wav.js          浏览器侧 WAV 编码与重采样
   js/pcm-worklet.js  AudioWorklet PCM 采集
-  js/api.js          后端 API 封装
+  js/api.js          后端 API 封装（含模型 SSE 流）
   js/messages.js     中文文案与错误映射
 tests/               pytest 自动化测试（Mock 与真实模型分层）
 samples/             chinese.wav / english.wav / reference.txt
 scripts/             download_model.py / offline_check.py / prepare_samples.py / e2e_browser_check.py
+AGENTS.md            AI 编码代理的协作规范与不可违反约束
 ```
 
 > 文档（`requirements.md`、`design.md`、`test-report.md`、`ai-development.md`）随源码包单独提交，
@@ -308,16 +366,29 @@ sherpa-onnx/Paraformer 中文强但英文与自动语种识别弱；Vosk 体积�
 - 麦克风录音与文件上传共用同一条识别管线；
 - 纯静音片段直接短路为「未检测到语音」，避免 Whisper 在静音上产生幻觉文本。
 
-### 9.3 稳定性
+### 9.3 模型管理与热切换
+
+`app/models.py` 维护一份精选模型目录（参数量、下载体积、语言、许可），并检查本地 HuggingFace
+缓存判断哪些档位已经下载。选择结果写入 `models/state.json`，`ModelManager` 在应用启动时把它应用到
+`WhisperEngine`，因此切换模型不需要重启服务；下载/预热通过 SSE 推送进度（`GET /api/models/{id}/download`），
+前端据此显示百分比。
+
+### 9.4 稳定性
 
 - 模型**懒加载**：导入应用、运行 pytest、访问页面都不会触发下载。
 - CTranslate2 模型非线程安全：加载与推理分别加锁，多请求自动串行，避免崩溃。
-- 所有失败都转换为带 `code` 的 JSON 错误，页面给出中文可读提示并可重试。
+- **每请求时限**：`deadline = 4 × 音频时长 + 15 s`（可配置），解码在分段边界检查时限；
+  超时返回 504 或带 `deadline_exceeded` 的部分结果，避免页面长时间无反馈。
+- **降级阶梯**：配置 `STT_FALLBACK_MODEL` 后，主模型推理失败会自动改用备用档位一次，
+  响应以 `degraded_model` 标注，并恢复主模型供后续请求使用。
+- 所有失败都转换为带 `code` / `stage` / `retryable` 的 JSON 错误，页面给出中文可读提示并可重试。
 
 ## 10. 已知限制
 
 - `small` 模型在强噪声、口音较重或远场录音下仍可能出错；中文标点为半角（`,`/`。`），页面展示为模型原始输出。
-- 实时识别是「分片识别 + 拼接」，跨切片的词可能被切断，标点与断句不如一次性整段识别自然。
+- 实时识别是「分片识别 + 拼接 + 停止后整段复核」，首字延迟约 6–7 秒；跨切片的词可能被切断。
+- 词级时间戳（`word_timestamps`）会额外做一次对齐，推理时间约增加到 2–2.5 倍，默认关闭。
+- 备用模型降级要求该档位已缓存或允许联网下载，否则仍返回原始错误。
 - 服务端同一时刻只处理一个推理请求（CPU 场景下的取舍），并发请求会排队。
 - 仅支持 Chrome / Edge 最新稳定版；Safari / Firefox 未做适配。
 
