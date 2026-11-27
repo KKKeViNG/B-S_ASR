@@ -105,11 +105,17 @@ class Settings:
     offline: bool = False
     vad_filter: bool = False
     preload: bool = True
+    #: Word-level timings cost roughly 2-2.5x inference time; off by default.
+    word_timestamps: bool = False
 
     # ---- Request handling ----
     default_language: str = "zh"
     max_upload_bytes: int = 10 * 1024 * 1024
     max_audio_seconds: float = 120.0
+    #: 0 means "derive from the audio duration" (4x audio + 15 s, capped).
+    request_timeout_seconds: float = 0.0
+    #: Optional smaller model used once when inference fails, e.g. "base".
+    fallback_model: str = ""
 
     # ---- Microphone recording / streaming (bonus feature) ----
     max_recording_seconds: float = 60.0
@@ -137,9 +143,14 @@ class Settings:
             offline=_env_bool("STT_OFFLINE", cls.offline),
             vad_filter=_env_bool("STT_VAD_FILTER", cls.vad_filter),
             preload=_env_bool("STT_PRELOAD", cls.preload),
+            word_timestamps=_env_bool("STT_WORD_TIMESTAMPS", cls.word_timestamps),
             default_language=_env_str("STT_DEFAULT_LANGUAGE", cls.default_language),
             max_upload_bytes=_env_int("STT_MAX_UPLOAD_BYTES", cls.max_upload_bytes),
             max_audio_seconds=_env_float("STT_MAX_AUDIO_SECONDS", cls.max_audio_seconds),
+            request_timeout_seconds=_env_float(
+                "STT_REQUEST_TIMEOUT_SECONDS", cls.request_timeout_seconds
+            ),
+            fallback_model=_env_str("STT_FALLBACK_MODEL", cls.fallback_model),
             max_recording_seconds=_env_float(
                 "STT_MAX_RECORDING_SECONDS", cls.max_recording_seconds
             ),
@@ -167,6 +178,13 @@ class Settings:
     def max_upload_mb(self) -> float:
         return round(self.max_upload_bytes / (1024 * 1024), 2)
 
+    def timeout_for(self, audio_seconds: float) -> float:
+        """Request deadline for one clip (never below 15 s)."""
+
+        if self.request_timeout_seconds > 0:
+            return self.request_timeout_seconds
+        return max(15.0, min(600.0, audio_seconds * 4.0 + 15.0))
+
     def public_config(self) -> dict[str, object]:
         """Configuration exposed to the browser via ``GET /api/config``."""
 
@@ -185,6 +203,9 @@ class Settings:
                 "beam_size": self.beam_size,
                 "offline": self.offline,
                 "preload": self.preload,
+                "word_timestamps": self.word_timestamps,
+                "fallback_model": self.fallback_model or None,
+                "request_timeout_seconds": self.request_timeout_seconds,
             },
             "streaming": {
                 "enabled": self.streaming_enabled,

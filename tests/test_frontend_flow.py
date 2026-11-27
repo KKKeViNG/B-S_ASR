@@ -16,6 +16,9 @@ from tests.helpers import post_audio, wav_bytes
 STATIC_DIR = PROJECT_ROOT / "static"
 REQUIRED_CONTROL_IDS = [
     "language-group",
+    "model-select",
+    "model-apply",
+    "model-status",
     "mode-group",
     "record-button",
     "stop-button",
@@ -24,6 +27,11 @@ REQUIRED_CONTROL_IDS = [
     "file-input",
     "upload-button",
     "result-text",
+    "audio-player",
+    "segment-list",
+    "export-txt",
+    "export-srt",
+    "export-vtt",
     "copy-button",
 ]
 
@@ -37,6 +45,8 @@ def test_index_page_exposes_required_controls(client):
     assert "结束录音" in body
     assert "上传音频文件" in body
     assert "识别结果" in body
+    assert "识别模型" in body
+    assert "导出 SRT" in body
 
 
 def test_javascript_uses_documented_endpoints():
@@ -47,7 +57,22 @@ def test_javascript_uses_documented_endpoints():
     assert "FormData" in api_source
     assert "form.append('file'" in api_source
     assert "form.append('language'" in api_source
+    assert "/api/models" in api_source
+    assert "/api/models/select" in api_source
+    assert "/api/subtitles" in api_source
+    assert "/download" in api_source
     assert "/ws/stream" in streaming_source
+
+
+def test_frontend_wires_model_switch_player_and_export():
+    app_source = (STATIC_DIR / "js" / "app.js").read_text(encoding="utf-8")
+
+    assert "fetchModels" in app_source
+    assert "streamModelDownload" in app_source
+    assert "fetchSubtitles" in app_source
+    assert "audioPlayer" in app_source
+    assert "segmentList" in app_source
+    assert "timeupdate" in app_source
 
 
 def test_recorder_uses_media_recorder_with_opus():

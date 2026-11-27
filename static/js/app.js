@@ -3,7 +3,17 @@
  * the streaming bonus feature to the DOM.
  */
 
-import { fetchConfig, fetchModelStatus, fetchSample, transcribeAudio, ApiError } from './api.js';
+import {
+  fetchConfig,
+  fetchModelStatus,
+  fetchModels,
+  fetchSample,
+  fetchSubtitles,
+  selectModel,
+  streamModelDownload,
+  transcribeAudio,
+  ApiError,
+} from './api.js';
 import { MicRecorder } from './recorder.js';
 import { StreamRecorder } from './streaming.js';
 import {
@@ -23,7 +33,15 @@ const el = {
   serviceBadge: $('service-badge'),
   modelBadge: $('model-badge'),
 
+  modelSelect: $('model-select'),
+  modelApply: $('model-apply'),
+  modelStatus: $('model-status'),
+  modelHint: $('model-hint'),
+  modelProgressTrack: $('model-progress-track'),
+  modelProgressBar: $('model-progress-bar'),
+
   languageGroup: $('language-group'),
+  wordTimestamps: $('word-timestamps'),
   modeGroup: $('mode-group'),
   recordLimit: $('record-limit'),
   recordButton: $('record-button'),
@@ -49,6 +67,12 @@ const el = {
   metaProcessing: $('meta-processing'),
   metaModel: $('meta-model'),
   resultText: $('result-text'),
+  audioPlayer: $('audio-player'),
+  segmentPanel: $('segment-panel'),
+  segmentList: $('segment-list'),
+  exportTxt: $('export-txt'),
+  exportSrt: $('export-srt'),
+  exportVtt: $('export-vtt'),
   copyButton: $('copy-button'),
   clearButton: $('clear-button'),
   copyFeedback: $('copy-feedback'),
@@ -82,7 +106,11 @@ const modeButtons = Array.from(el.modeGroup.querySelectorAll('[data-mode]'));
 const state = {
   config: null,
   model: null,
+  models: [],
+  selectedModel: null,
+  modelBusy: false,
   language: 'zh',
+  wordTimestamps: false,
   mode: 'batch',
   busy: false,
   recording: false,
@@ -93,6 +121,10 @@ const state = {
   timerId: null,
   startedAt: 0,
   streamProcessing: 0,
+  segments: [],
+  activeSegment: -1,
+  audioBlob: null,
+  audioUrl: null,
 };
 
 /* -------------------------------------------------------------------------- */
@@ -115,6 +147,7 @@ async function init() {
     applyModelInfo(model);
     setBadge(el.serviceBadge, 'ok', '服务正常');
     if (config.version) el.footerVersion.textContent = `v${config.version}`;
+    await loadModels();
   } catch (error) {
     setBadge(el.serviceBadge, 'error', '服务不可用');
     setStatus('服务不可用', 'error');
@@ -146,6 +179,247 @@ function applyModelInfo(model) {
   } else {
     setBadge(el.modelBadge, 'warn', `模型：${name} · 首次识别时加载`);
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/* model management                                                           */
+/* -------------------------------------------------------------------------- */
+
+async function loadModels() {
+  try {
+    const payload = await fetchModels();
+    state.models = Array.isArray(payload.models) ? payload.models : [];
+    state.selectedModel = payload.selected || state.selectedModel;
+    renderModelOptions();
+    updateModelSummary();
+    refreshControls();
+  } catch (error) {
+    el.modelStatus.textContent = '模型列表读取失败，可刷新页面重试。';
+    el.modelApply.disabled = true;
+    showError(error);
+  }
+}
+
+function renderModelOptions() {
+  el.modelSelect.innerHTML = '';
+  state.models.forEach((model) => {
+    const option = document.createElement('option');
+    option.value = model.id;
+    const stateLabel = model.downloaded ? '已下载' : `需下载 ${model.size_mb} MB`;
+    option.textContent = `${model.display_name} · ${model.params} · ${stateLabel}${model.recommended ? ' · 推荐' : ''}`;
+    el.modelSelect.appendChild(option);
+  });
+  const preferred = state.selectedModel || (state.models[0] && state.models[0].id);
+  if (preferred) el.modelSelect.value = preferred;
+}
+
+function updateModelSummary() {
+  const model = state.models.find((item) => item.id === state.selectedModel);
+  if (!model) {
+    el.modelStatus.textContent = '模型信息不可用';
+    return;
+  }
+  const downloadState = model.downloaded
+    ? '已下载'
+    : `未下载（约 ${model.size_mb} MB，应用后自动下载）`;
+  el.modelStatus.textContent = `${model.description} 当前：${model.display_name} · ${downloadState}`;
+  el.modelHint.textContent = model.recommended
+    ? '推荐档位：准确率与 CPU 速度折中'
+    : '切换模型无需重启服务';
+}
+
+async function applySelectedModel() {
+  const modelId = el.modelSelect.value;
+  if (!modelId || state.modelBusy) return;
+
+  clearAlert();
+  state.modelBusy = true;
+  el.modelProgressTrack.hidden = true;
+  refreshControls();
+  setStatus(`正在切换模型 ${modelId}…`, 'busy');
+
+  try {
+    const response = await selectModel(modelId);
+    state.selectedModel = response.selected;
+    updateModelSummary();
+
+    if (response.model && response.model.downloaded) {
+      el.modelStatus.textContent = `已切换到 ${response.model.display_name}，下一次识别时加载权重。`;
+      setBadge(el.modelBadge, 'warn', `模型：${response.model.display_name} · 待加载`);
+      setStatus('模型已切换');
+    } else {
+      await downloadModelWeights(modelId);
+    }
+    await loadModels();
+  } catch (error) {
+    showError(error);
+    setStatus('模型切换失败', 'error');
+  } finally {
+    state.modelBusy = false;
+    el.modelProgressTrack.hidden = true;
+    el.modelProgressBar.style.width = '0%';
+    refreshControls();
+  }
+}
+
+async function downloadModelWeights(modelId) {
+  el.modelProgressTrack.hidden = false;
+  el.modelProgressBar.style.width = '0%';
+  el.modelStatus.textContent = `正在准备模型 ${modelId}…`;
+  setStatus(`正在下载/加载模型 ${modelId}…`, 'busy');
+
+  const finalEvent = await streamModelDownload(modelId, (event) => {
+    if (typeof event.progress === 'number') {
+      el.modelProgressBar.style.width = `${Math.round(event.progress * 100)}%`;
+    }
+    if (event.stage === 'starting') {
+      el.modelStatus.textContent = `开始下载 ${modelId}…`;
+    } else if (event.stage === 'downloading') {
+      const downloaded = Math.round((event.bytes || 0) / 1048576);
+      const total = Math.round((event.total_bytes || 0) / 1048576);
+      el.modelStatus.textContent = `正在下载 ${modelId}：${downloaded} / ${total} MB`;
+    } else if (event.stage === 'loading') {
+      el.modelStatus.textContent = `正在加载 ${modelId} 权重…`;
+    } else if (event.stage === 'ready') {
+      el.modelStatus.textContent = `模型 ${modelId} 已就绪（加载 ${event.load_seconds}s）`;
+      setBadge(el.modelBadge, 'ok', `模型已加载 · ${modelId}`);
+    }
+  });
+
+  if (finalEvent && finalEvent.stage === 'error') {
+    throw new ApiError(finalEvent.detail || '模型下载或加载失败。', {
+      code: finalEvent.code || 'model_unavailable',
+      status: 0,
+      payload: finalEvent,
+    });
+  }
+  setStatus('模型已就绪', 'ok');
+}
+
+/* -------------------------------------------------------------------------- */
+/* audio player, segments and export                                          */
+/* -------------------------------------------------------------------------- */
+
+function formatClock(seconds) {
+  const safe = Math.max(0, Number(seconds) || 0);
+  const minutes = Math.floor(safe / 60);
+  const rest = safe - minutes * 60;
+  return `${String(minutes).padStart(2, '0')}:${rest.toFixed(1).padStart(4, '0')}`;
+}
+
+function setAudioFromBlob(blob) {
+  if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
+  state.audioBlob = blob || null;
+  state.audioUrl = blob ? URL.createObjectURL(blob) : null;
+  if (blob) {
+    el.audioPlayer.src = state.audioUrl;
+    el.audioPlayer.hidden = false;
+  } else {
+    el.audioPlayer.removeAttribute('src');
+    el.audioPlayer.hidden = true;
+  }
+}
+
+function renderSegments(segments) {
+  state.segments = Array.isArray(segments) ? segments : [];
+  state.activeSegment = -1;
+  el.segmentList.innerHTML = '';
+
+  if (state.segments.length === 0) {
+    el.segmentPanel.hidden = true;
+    setExportEnabled(false);
+    return;
+  }
+
+  el.segmentPanel.hidden = false;
+  state.segments.forEach((segment) => {
+    const item = document.createElement('li');
+    item.className = 'segment';
+
+    const timeButton = document.createElement('button');
+    timeButton.type = 'button';
+    timeButton.className = 'segment__time';
+    timeButton.textContent = formatClock(segment.start);
+    timeButton.title = '跳转到这一段';
+    timeButton.addEventListener('click', () => seekTo(segment.start));
+
+    const text = document.createElement('span');
+    text.className = 'segment__text';
+    text.textContent = String(segment.text || '').trim();
+
+    item.append(timeButton, text);
+    el.segmentList.appendChild(item);
+  });
+  setExportEnabled(true);
+}
+
+function setExportEnabled(enabled) {
+  el.exportTxt.disabled = !enabled;
+  el.exportSrt.disabled = !enabled;
+  el.exportVtt.disabled = !enabled;
+}
+
+function seekTo(seconds) {
+  if (!state.audioUrl) return;
+  try {
+    el.audioPlayer.currentTime = Math.max(0, Number(seconds) || 0);
+    const playback = el.audioPlayer.play();
+    if (playback && typeof playback.catch === 'function') playback.catch(() => {});
+  } catch (error) {
+    /* seeking is best effort */
+  }
+}
+
+function handleAudioTimeUpdate() {
+  if (state.segments.length === 0) return;
+  const time = el.audioPlayer.currentTime;
+  let index = -1;
+  for (let i = 0; i < state.segments.length; i += 1) {
+    const segment = state.segments[i];
+    if (time >= (segment.start || 0) - 0.05 && time <= (segment.end || 0) + 0.05) {
+      index = i;
+      break;
+    }
+  }
+  if (index === state.activeSegment) return;
+  state.activeSegment = index;
+  Array.from(el.segmentList.children).forEach((node, i) => {
+    node.classList.toggle('is-active', i === index);
+  });
+  if (index >= 0 && !el.audioPlayer.paused) {
+    el.segmentList.children[index].scrollIntoView({ block: 'nearest' });
+  }
+}
+
+async function exportTranscript(format) {
+  if (state.segments.length === 0) return;
+  try {
+    const content = await fetchSubtitles({
+      segments: state.segments,
+      format,
+      text: el.resultText.value,
+    });
+    const mime = format === 'txt' ? 'text/plain' : format === 'vtt' ? 'text/vtt' : 'application/x-subrip';
+    downloadTextFile(content, `transcript.${format}`, mime);
+    el.copyFeedback.textContent = `已导出 ${format.toUpperCase()}`;
+    window.setTimeout(() => {
+      el.copyFeedback.textContent = '';
+    }, 2000);
+  } catch (error) {
+    showError(error);
+  }
+}
+
+function downloadTextFile(content, filename, mimeType) {
+  const blob = new Blob([content], { type: `${mimeType};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -188,6 +462,23 @@ function bindEvents() {
   });
 
   el.copyButton.addEventListener('click', copyResult);
+
+  el.wordTimestamps.addEventListener('change', () => {
+    state.wordTimestamps = Boolean(el.wordTimestamps.checked);
+  });
+
+  el.modelApply.addEventListener('click', applySelectedModel);
+  el.modelSelect.addEventListener('change', () => {
+    const model = state.models.find((item) => item.id === el.modelSelect.value);
+    if (!model) return;
+    const stateLabel = model.downloaded ? '已下载' : `需下载约 ${model.size_mb} MB`;
+    el.modelStatus.textContent = `${model.description} ${model.display_name} · ${stateLabel}`;
+  });
+
+  el.exportTxt.addEventListener('click', () => exportTranscript('txt'));
+  el.exportSrt.addEventListener('click', () => exportTranscript('srt'));
+  el.exportVtt.addEventListener('click', () => exportTranscript('vtt'));
+  el.audioPlayer.addEventListener('timeupdate', handleAudioTimeUpdate);
 
   el.dropZone.addEventListener('click', () => el.fileInput.click());
   el.dropZone.addEventListener('keydown', (event) => {
@@ -464,8 +755,13 @@ async function runTranscription({ blob, filename, source }) {
   setProgress(0.4, true);
 
   try {
-    const response = await transcribeAudio({ blob, filename, language: state.language });
-    applyTranscription(response, source);
+    const response = await transcribeAudio({
+      blob,
+      filename,
+      language: state.language,
+      wordTimestamps: state.wordTimestamps,
+    });
+    applyTranscription(response, source, blob);
     setProgress(1, true);
     window.setTimeout(() => setProgress(0, false), 700);
     setStatus('识别完成', 'ok');
@@ -480,10 +776,18 @@ async function runTranscription({ blob, filename, source }) {
   }
 }
 
-function applyTranscription(response, source) {
+function applyTranscription(response, source, blob = null) {
   const text = response.text || '';
   el.resultText.value = text;
   el.resultText.scrollTop = 0;
+
+  setAudioFromBlob(blob);
+  renderSegments(response.segments || []);
+
+  const warnings = String(response.warning || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
 
   el.metaLanguage.textContent = languageLabel(response.language);
   el.metaDuration.textContent = formatDurationLong(response.duration_seconds);
@@ -500,6 +804,20 @@ function applyTranscription(response, source) {
     setBadge(el.modelBadge, 'ok', `模型已加载 · ${response.model}`);
   }
 
+  if (warnings.includes('degraded_model')) {
+    showAlert(
+      '已降级到备用模型',
+      '主模型本次推理失败，结果由备用模型生成，准确率可能略有下降；可稍后重试主模型。',
+      'warn',
+    );
+  } else if (warnings.includes('deadline_exceeded')) {
+    showAlert(
+      '识别超出时限',
+      '已返回部分识别结果。可尝试缩短音频，或在「识别模型」中切换到更小的档位。',
+      'warn',
+    );
+  }
+
   if (!text) {
     el.resultHint.textContent = '识别完成，但没有检测到可识别的语音';
     showAlert(
@@ -510,7 +828,8 @@ function applyTranscription(response, source) {
     return;
   }
 
-  el.resultHint.textContent = `识别完成 · ${text.length} 个字符`;
+  const suffix = warnings.includes('deadline_exceeded') ? '（部分结果）' : '';
+  el.resultHint.textContent = `识别完成 · ${text.length} 个字符${suffix}`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -629,6 +948,8 @@ async function stopStreaming(auto) {
     const final = await recorder.stop();
     if (final) {
       el.resultText.value = final.text || '';
+      renderSegments(final.segments || []);
+      if (recorder.lastAudioBlob) setAudioFromBlob(recorder.lastAudioBlob);
       const language = final.language || state.language;
       el.metaLanguage.textContent = languageLabel(language);
       el.statusLanguage.textContent = languageLabel(language);
@@ -689,7 +1010,10 @@ function refreshControls() {
   el.sampleChips.forEach((button) => {
     button.disabled = locked;
   });
+  el.modelSelect.disabled = locked || state.modelBusy;
+  el.modelApply.disabled = locked || state.modelBusy || state.models.length === 0;
   el.copyButton.disabled = !el.resultText.value;
+  setExportEnabled(state.segments.length > 0 && !locked);
 }
 
 function setStatus(text, tone = 'idle') {
@@ -743,6 +1067,8 @@ function clearResult() {
   el.copyFeedback.textContent = '';
   el.copyButton.disabled = true;
   el.recordTimer.textContent = formatTimer(0);
+  setAudioFromBlob(null);
+  renderSegments([]);
 }
 
 function setBadge(element, tone, text) {
@@ -781,7 +1107,8 @@ function showError(error) {
   if (error instanceof ApiError) {
     const title = ERROR_TITLES[error.code] || '识别请求失败';
     const advice = ERROR_ADVICE[error.code] || '';
-    const detail = [error.message, advice].filter(Boolean).join(' ');
+    const retryHint = error.retryable ? '（该错误可重试）' : '';
+    const detail = [error.message, retryHint, advice].filter(Boolean).join(' ');
     const raw = error.status ? `HTTP ${error.status} · ${error.code}` : error.code;
     showAlert(title, detail, 'error', raw);
     return;

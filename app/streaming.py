@@ -37,6 +37,7 @@ from .asr.base import ASREngine, normalize_text
 from .audio import decode_audio
 from .config import SUPPORTED_LANGUAGES, Settings
 from .errors import AppError, InvalidLanguageError
+from .serializers import segment_payloads
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +242,7 @@ async def handle_stream(websocket: WebSocket, settings: Settings, engine: ASREng
                         "processing_seconds": round(time.perf_counter() - refine_started, 3),
                         "chunks": state.chunk_index,
                         "refined": True,
+                        "segments": segment_payloads(result.segments),
                         "model": settings.model_display_name,
                     },
                 )

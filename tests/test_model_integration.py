@@ -85,6 +85,7 @@ def test_engine_passes_language_and_decoding_options(tmp_path: Path, settings: S
     assert stub.kwargs["task"] == "transcribe"
     assert stub.kwargs["beam_size"] == settings.beam_size
     assert stub.kwargs["condition_on_previous_text"] is False
+    assert stub.kwargs["word_timestamps"] is False
     assert result.text == "Hello world", "whitespace must be normalised across segments"
     assert result.language == "en"
     assert result.detected_language == "en"

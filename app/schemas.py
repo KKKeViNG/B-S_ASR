@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -11,10 +13,20 @@ class HealthResponse(BaseModel):
     status: str = Field(default="ok", examples=["ok"])
 
 
+class WordOut(BaseModel):
+    """One timed word inside a segment (requires word timestamps)."""
+
+    word: str
+    start: float
+    end: float
+    probability: float | None = None
+
+
 class SegmentOut(BaseModel):
     start: float
     end: float
     text: str
+    words: list[WordOut] = Field(default_factory=list)
 
 
 class TranscribeResponse(BaseModel):
@@ -36,6 +48,21 @@ class TranscribeResponse(BaseModel):
     segments: list[SegmentOut] = Field(default_factory=list)
     model: str | None = None
     warning: str | None = None
+    truncated: bool = False
+
+
+class SubtitleRequest(BaseModel):
+    """Request for ``POST /api/subtitles`` (formatting only, no inference)."""
+
+    segments: list[SegmentOut] = Field(min_length=1)
+    format: Literal["srt", "vtt", "txt"] = "srt"
+    text: str | None = None
+
+
+class ModelSelectRequest(BaseModel):
+    """Request for ``POST /api/models/select``."""
+
+    model: str = Field(min_length=1, examples=["small"])
 
 
 class ErrorResponse(BaseModel):
@@ -43,3 +70,5 @@ class ErrorResponse(BaseModel):
 
     code: str = Field(examples=["unsupported_format"])
     detail: str = Field(examples=["Unsupported audio format '.txt'."])
+    stage: str = Field(default="request", examples=["decode"])
+    retryable: bool = Field(default=False)

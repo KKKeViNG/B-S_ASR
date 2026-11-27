@@ -59,6 +59,7 @@ export class StreamRecorder {
     this._assembledFinal = null;
     this._refineTimer = null;
     this.refineEnabled = true;
+    this.lastAudioBlob = null;
 
     this._readyResolve = null;
     this._readyReject = null;
@@ -371,6 +372,7 @@ export class StreamRecorder {
     }
 
     const blob = encodeWav(samples, TARGET_RATE);
+    this.lastAudioBlob = blob;
     blob
       .arrayBuffer()
       .then((buffer) => {

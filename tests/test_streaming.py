@@ -198,6 +198,7 @@ def test_refine_returns_a_clean_final_transcript(client, fake_engine):
     assert refined["duration_seconds"] == pytest.approx(2.5, abs=0.05)
     assert refined["language"] == "zh"
     assert refined["processing_seconds"] >= 0
+    assert refined["segments"][0]["words"], "refined final should expose word timings"
 
 
 def test_refine_with_undecodable_audio_reports_refine_error(client):

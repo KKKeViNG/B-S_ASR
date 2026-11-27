@@ -37,6 +37,9 @@ def test_config_endpoint_exposes_limits_and_model(client, settings):
     assert ".wav" in payload["allowed_extensions"]
     assert payload["model"]["name"] == "faster-whisper/small"
     assert payload["model"]["device"] == "cpu"
+    assert payload["model"]["word_timestamps"] is False
+    assert payload["model"]["fallback_model"] is None
+    assert "request_timeout_seconds" in payload["model"]
     assert payload["streaming"]["endpoint"] == "/ws/stream"
     assert payload["streaming"]["enabled"] is True
 

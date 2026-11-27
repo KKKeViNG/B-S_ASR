@@ -96,8 +96,49 @@ def wait_for_result(page, error_message: str, timeout: float = 180_000) -> str:
     return text
 
 
+def assert_result_assets(page) -> None:
+    """Every successful recognition should expose a player, segments and exports."""
+
+    page.wait_for_selector("#audio-player", state="visible", timeout=15_000)
+    page.wait_for_selector("#segment-list .segment", timeout=15_000)
+    for button in ("#export-txt", "#export-srt", "#export-vtt"):
+        if not page.is_enabled(button):
+            raise AssertionError(f"{button} should be enabled after recognition")
+
+
+def scenario_model_ui(page, base_url: str, results: dict) -> None:
+    print("[1/5] model catalogue and switching ...")
+    page.goto(base_url + "/", wait_until="domcontentloaded")
+    page.wait_for_selector("#service-badge", state="visible")
+    page.wait_for_function(
+        "() => document.getElementById('service-badge').textContent.includes('服务正常')",
+        timeout=30_000,
+    )
+    page.wait_for_function(
+        "() => document.querySelectorAll('#model-select option').length >= 5",
+        timeout=30_000,
+    )
+
+    options = page.eval_on_selector_all("#model-select option", "els => els.map(el => el.value)")
+    selected = page.input_value("#model-select")
+    page.click("#model-apply")
+    page.wait_for_function(
+        "() => { const el = document.getElementById('model-status'); return el && (el.textContent.includes('已切换') || el.textContent.includes('已就绪')); }",
+        timeout=60_000,
+    )
+    page.screenshot(path=str(SCREENSHOTS / "ui-model-select.png"), full_page=True)
+
+    results["model_ui"] = {
+        "options": options,
+        "selected": selected,
+        "status": page.text_content("#model-status"),
+    }
+    print(f"      options: {options}")
+    print(f"      status:  {page.text_content('#model-status')}")
+
+
 def scenario_record_chinese(page, base_url: str, results: dict) -> None:
-    print("[1/4] microphone recording (Chinese) ...")
+    print("[2/5] microphone recording (Chinese) ...")
     page.goto(base_url + "/", wait_until="domcontentloaded")
     page.wait_for_selector("#service-badge", state="visible")
     page.wait_for_function(
@@ -116,6 +157,13 @@ def scenario_record_chinese(page, base_url: str, results: dict) -> None:
     page.click("#stop-button")
 
     text = wait_for_result(page, "recording produced no transcription")
+    try:
+        assert_result_assets(page)
+        player_visible = True
+    except AssertionError:
+        player_visible = False
+        page.screenshot(path=str(SCREENSHOTS / "ui-record-missing-assets.png"), full_page=True)
+        raise
     SCREENSHOTS.mkdir(parents=True, exist_ok=True)
     page.screenshot(path=str(SCREENSHOTS / "ui-record-chinese.png"), full_page=True)
 
@@ -125,13 +173,16 @@ def scenario_record_chinese(page, base_url: str, results: dict) -> None:
         "duration": page.text_content("#meta-duration"),
         "processing": page.text_content("#meta-processing"),
         "language": page.text_content("#meta-language"),
+        "player_visible": player_visible,
+        "segments": page.eval_on_selector_all("#segment-list .segment", "els => els.length"),
         "has_chinese": any("\u4e00" <= char <= "\u9fff" for char in text),
     }
     print(f"      text: {text}")
+    print(f"      segments: {results['record_zh']['segments']}")
 
 
 def scenario_upload_english(page, base_url: str, results: dict) -> None:
-    print("[2/4] uploading samples/english.wav (English) ...")
+    print("[3/5] uploading samples/english.wav (English) ...")
     page.goto(base_url + "/", wait_until="domcontentloaded")
     page.wait_for_selector("#service-badge", state="visible")
     page.wait_for_function(
@@ -145,19 +196,31 @@ def scenario_upload_english(page, base_url: str, results: dict) -> None:
     page.click("#upload-button")
 
     text = wait_for_result(page, "upload produced no transcription")
+    assert_result_assets(page)
     page.screenshot(path=str(SCREENSHOTS / "ui-upload-english.png"), full_page=True)
+
+    with page.expect_download() as download_info:
+        page.click("#export-srt")
+    download = download_info.value
+    subtitle_path = Path(tempfile.gettempdir()) / "e2e-transcript.srt"
+    download.save_as(str(subtitle_path))
+    subtitle_text = subtitle_path.read_text(encoding="utf-8")
+    if not subtitle_text.startswith("1\n") or "-->" not in subtitle_text:
+        raise AssertionError("exported SRT does not look like valid SubRip")
 
     results["upload_en"] = {
         "text": text,
         "duration": page.text_content("#meta-duration"),
         "processing": page.text_content("#meta-processing"),
         "language": page.text_content("#meta-language"),
+        "srt_preview": subtitle_text[:120],
     }
     print(f"      text: {text}")
+    print(f"      srt:  {subtitle_text.splitlines()[1]}")
 
 
 def scenario_streaming(page, base_url: str, results: dict) -> None:
-    print("[3/4] real-time streaming (Chinese) ...")
+    print("[4/5] real-time streaming (Chinese) ...")
     page.goto(base_url + "/", wait_until="domcontentloaded")
     page.wait_for_selector("#service-badge", state="visible")
     page.wait_for_function(
@@ -197,9 +260,11 @@ def scenario_streaming(page, base_url: str, results: dict) -> None:
         "first_partial_seconds": first_partial_seconds,
         "duration": page.text_content("#meta-duration"),
         "processing": page.text_content("#meta-processing"),
+        "segments": page.eval_on_selector_all("#segment-list .segment", "els => els.length"),
     }
     print(f"      first partial after {first_partial_seconds}s: {partial_text}")
     print(f"      final: {final_text}")
+    print(f"      segments: {results['streaming_zh']['segments']}")
 
 
 def launch_browser(playwright, *, headless: bool, channel: str | None, extra_args: list[str]):
@@ -210,7 +275,7 @@ def launch_browser(playwright, *, headless: bool, channel: str | None, extra_arg
 
 
 def scenario_permission_denied(playwright, base_url: str, results: dict, channel: str | None = None) -> None:
-    print("[4/4] microphone permission denied ...")
+    print("[5/5] microphone permission denied ...")
     browser = launch_browser(
         playwright,
         headless=True,
@@ -314,6 +379,7 @@ def main() -> int:
             page.on("pageerror", lambda error: page_errors.append(str(error)))
 
             try:
+                scenario_model_ui(page, base_url, results)
                 scenario_record_chinese(page, base_url, results)
                 scenario_upload_english(page, base_url, results)
                 if not args.skip_streaming:
@@ -328,8 +394,11 @@ def main() -> int:
         results["page_errors"] = page_errors
 
         checks = {
+            "model_ui": len(results.get("model_ui", {}).get("options", [])) >= 5,
             "record_chinese": bool(results.get("record_zh", {}).get("has_chinese")),
+            "record_assets": bool(results.get("record_zh", {}).get("player_visible")),
             "upload_english": "hello" in results.get("upload_en", {}).get("text", "").lower(),
+            "srt_export": "-->" in results.get("upload_en", {}).get("srt_preview", ""),
             "streaming": bool(results.get("streaming_zh", {}).get("final_text", "").strip())
             if not args.skip_streaming
             else True,

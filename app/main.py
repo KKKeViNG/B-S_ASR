@@ -10,9 +10,13 @@ GET  /                                            web UI
 
 Additional endpoints:
 
-* ``GET  /api/config`` - limits and model metadata for the browser
-* ``GET  /api/model``  - model/back-end status
-* ``WS   /ws/stream``  - near real-time recognition (bonus feature)
+* ``GET  /api/config``                    - limits and model metadata for the browser
+* ``GET  /api/model``                     - model/back-end status
+* ``GET  /api/models``                    - selectable model catalogue
+* ``POST /api/models/select``             - persist and hot-switch the model
+* ``GET  /api/models/{id}/download``      - SSE progress for download + warm-up
+* ``POST /api/subtitles``                 - SRT / WebVTT / TXT formatting
+* ``WS   /ws/stream``                     - near real-time recognition (bonus)
 
 Start with::
 
@@ -21,6 +25,8 @@ Start with::
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import threading
 import time
@@ -29,7 +35,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import FastAPI, File, Form, Request, UploadFile, WebSocket
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
@@ -38,13 +44,25 @@ from .asr import ASREngine, build_engine
 from .audio import decode_audio, validate_upload
 from .config import PROJECT_ROOT, SUPPORTED_LANGUAGES, Settings
 from .errors import (
+    AppError,
     BadRequestError,
     InvalidLanguageError,
     PayloadTooLargeError,
+    RecognitionTimeoutError,
     register_exception_handlers,
 )
-from .schemas import ErrorResponse, HealthResponse, SegmentOut, TranscribeResponse
+from .models import MODEL_CATALOG, ModelManager, catalog_entry, is_model_cached
+from .schemas import (
+    ErrorResponse,
+    HealthResponse,
+    ModelSelectRequest,
+    SegmentOut,
+    SubtitleRequest,
+    TranscribeResponse,
+)
+from .serializers import segment_payloads
 from .streaming import handle_stream
+from .subtitles import MEDIA_TYPES, build_subtitles
 
 logger = logging.getLogger(__name__)
 
@@ -117,11 +135,92 @@ async def _read_upload(file: UploadFile, limit: int) -> bytes:
     return b"".join(chunks)
 
 
-def _model_cache_present(model_dir: Path) -> bool:
-    """True when a CTranslate2 model file is already cached locally."""
+async def _call_engine(
+    engine: ASREngine,
+    samples,
+    sample_rate: int,
+    language: str | None,
+    deadline: float,
+    timeout: float,
+    word_timestamps: bool | None,
+):
+    """Run one inference with a hard wall-clock guard on top of the deadline."""
+
+    call = run_in_threadpool(
+        engine.transcribe,
+        samples,
+        sample_rate,
+        language,
+        deadline=deadline,
+        word_timestamps=word_timestamps,
+    )
+    try:
+        return await asyncio.wait_for(call, timeout=timeout + 10.0)
+    except asyncio.TimeoutError as exc:
+        raise RecognitionTimeoutError(
+            f"Recognition did not finish within {timeout:.0f} s. The audio may be "
+            "too long for the current model on this CPU."
+        ) from exc
+
+
+async def _transcribe_with_fallback(
+    engine: ASREngine,
+    settings: Settings,
+    samples,
+    sample_rate: int,
+    language: str | None,
+    deadline: float,
+    timeout: float,
+    word_timestamps: bool | None = None,
+):
+    """Recognise a clip, optionally degrading to a smaller model once.
+
+    Returns ``(result, degraded_from)`` where *degraded_from* is the model that
+    failed, or ``None`` when the primary model succeeded.
+    """
+
+    primary_module = getattr(engine, "model_id", settings.model_size)
+    try:
+        result = await _call_engine(
+            engine, samples, sample_rate, language, deadline, timeout, word_timestamps
+        )
+        return result, None
+    except RecognitionTimeoutError:
+        raise
+    except AppError as primary_error:
+        fallback = (settings.fallback_model or "").strip()
+        can_fallback = (
+            bool(fallback)
+            and fallback != primary_module
+            and fallback in MODEL_CATALOG
+            and primary_error.retryable
+            and hasattr(engine, "set_model")
+        )
+        if not can_fallback:
+            raise
+        logger.warning(
+            "Primary model %s failed (%s); retrying with fallback %s",
+            primary_module,
+            primary_error.code,
+            fallback,
+        )
+        await run_in_threadpool(engine.set_model, fallback)
+        try:
+            result = await _call_engine(
+                engine, samples, sample_rate, language, deadline, timeout, word_timestamps
+            )
+        except Exception:
+            raise primary_error from None
+        finally:
+            await run_in_threadpool(engine.set_model, primary_module)
+        return result, primary_module
+
+
+def _model_cache_present(model_dir: Path, model_id: str) -> bool:
+    """True when the selected model is already cached locally."""
 
     try:
-        return any(model_dir.glob("**/model.bin"))
+        return is_model_cached(model_dir, model_id)
     except OSError:  # pragma: no cover - unreadable path
         return False
 
@@ -140,26 +239,28 @@ def create_app(
 
     settings = settings or Settings.from_env()
     engine = engine or build_engine(settings)
+    manager = ModelManager(settings, engine)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         logger.info(
             "Local STT service %s starting (model=%s, device=%s, compute=%s, offline=%s)",
             __version__,
-            settings.model_display_name,
+            manager.display_name(),
             settings.device,
             settings.compute_type,
             settings.offline,
         )
-        if not Path(settings.model_dir).exists():
+        model_dir = Path(settings.model_dir)
+        if not model_dir.exists():
             logger.info(
                 "Model directory %s does not exist yet; weights will be downloaded "
                 "on the first recognition request (or run scripts/download_model.py).",
-                settings.model_dir,
+                model_dir,
             )
         else:
             loader = getattr(engine, "load", None)
-            if settings.preload and loader is not None and _model_cache_present(Path(settings.model_dir)):
+            if settings.preload and loader is not None and _model_cache_present(model_dir, manager.current_model()):
                 # Warm the model in the background: start-up stays fast, the
                 # first user request does not have to wait for model loading.
                 def _warm_up() -> None:
@@ -184,6 +285,7 @@ def create_app(
     )
     app.state.settings = settings
     app.state.engine = engine
+    app.state.model_manager = manager
 
     register_exception_handlers(app)
 
@@ -233,6 +335,7 @@ def create_app(
             422: {"model": ErrorResponse, "description": "Invalid language or undecodable audio"},
             500: {"model": ErrorResponse, "description": "Inference failure"},
             503: {"model": ErrorResponse, "description": "ASR model unavailable"},
+            504: {"model": ErrorResponse, "description": "Recognition deadline exceeded"},
         },
     )
     async def transcribe(
@@ -242,11 +345,16 @@ def create_app(
             default="",
             description="Recognition language: 'zh', 'en' or 'auto' (empty -> server default)",
         ),
+        word_timestamps: bool | None = Form(
+            default=None,
+            description="Force word-level timings on/off (default: server setting, usually off)",
+        ),
     ) -> TranscribeResponse:
         """Recognise a complete audio clip (after-recording recognition)."""
 
         state_settings: Settings = request.app.state.settings
         app_engine: ASREngine = request.app.state.engine
+        state_manager: ModelManager = request.app.state.model_manager
         started = time.perf_counter()
 
         selected_language = normalize_language(language, state_settings)
@@ -268,25 +376,32 @@ def create_app(
         )
 
         if decoded.is_silent:
-            logger.info(
-                "Silent clip (%.2fs) - skipping inference", decoded.duration_seconds
-            )
+            logger.info("Silent clip (%.2fs) - skipping inference", decoded.duration_seconds)
             return TranscribeResponse(
                 text="",
                 language=fallback_language,
                 duration_seconds=decoded.duration_seconds,
                 processing_seconds=round(time.perf_counter() - started, 3),
-                model=state_settings.model_display_name,
+                model=state_manager.display_name(),
                 warning="no_speech_detected",
             )
 
-        result = await run_in_threadpool(
-            app_engine.transcribe,
+        timeout = state_settings.timeout_for(decoded.duration_seconds)
+        deadline = time.perf_counter() + timeout
+        language_argument = None if selected_language == "auto" else selected_language
+
+        result, degraded_from = await _transcribe_with_fallback(
+            app_engine,
+            state_settings,
             decoded.samples,
             decoded.sample_rate,
-            None if selected_language == "auto" else selected_language,
+            language_argument,
+            deadline,
+            timeout,
+            word_timestamps,
         )
 
+        used_model = result.model or getattr(app_engine, "model_id", None) or state_manager.selected
         response_language = (
             selected_language
             if selected_language in {"zh", "en"}
@@ -294,12 +409,27 @@ def create_app(
         )
         processing_seconds = round(time.perf_counter() - started, 3)
 
+        warnings: list[str] = []
+        if degraded_from:
+            warnings.append("degraded_model")
+        if result.truncated:
+            warnings.append("deadline_exceeded")
+        if not result.text and not result.truncated:
+            warnings.append("no_speech_detected")
+
+        if result.truncated and not result.text:
+            raise RecognitionTimeoutError(
+                f"Recognition reached the {timeout:.0f} s deadline before producing text. "
+                "Try a shorter clip or a smaller model."
+            )
+
         logger.info(
-            "Transcribed %s clip (%.2fs) in %.2fs -> %d chars",
+            "Transcribed %s clip (%.2fs) in %.2fs -> %d chars with %s",
             response_language,
             decoded.duration_seconds,
             processing_seconds,
             len(result.text),
+            used_model,
         )
 
         return TranscribeResponse(
@@ -309,12 +439,10 @@ def create_app(
             processing_seconds=processing_seconds,
             detected_language=result.detected_language,
             language_probability=result.language_probability,
-            segments=[
-                SegmentOut(start=segment.start, end=segment.end, text=segment.text)
-                for segment in result.segments
-            ],
-            model=state_settings.model_display_name,
-            warning=None if result.text else "no_speech_detected",
+            segments=[SegmentOut(**payload) for payload in segment_payloads(result.segments)],
+            model=state_manager.display_name(used_model),
+            warning=",".join(warnings) if warnings else None,
+            truncated=result.truncated,
         )
 
     # ---- auxiliary API ---------------------------------------------------
@@ -326,12 +454,71 @@ def create_app(
         return {**settings.public_config(), "version": __version__}
 
     @app.get("/api/model", tags=["system"])
-    async def model_status() -> dict[str, object]:
+    async def model_status(request: Request) -> dict[str, object]:
         """Report whether the model is loaded and how it is configured."""
 
-        status = dict(engine.status())
+        app_engine: ASREngine = request.app.state.engine
+        state_manager: ModelManager = request.app.state.model_manager
+        status = dict(app_engine.status())
         status["supported_languages"] = list(SUPPORTED_LANGUAGES)
+        status["selected_model"] = state_manager.selected
+        status["model_label"] = state_manager.display_name()
         return status
+
+    @app.get("/api/models", tags=["models"])
+    async def list_models(request: Request) -> dict[str, object]:
+        """Catalogue of selectable models with local cache state."""
+
+        state_manager: ModelManager = request.app.state.model_manager
+        return await run_in_threadpool(state_manager.list_models)
+
+    @app.post("/api/models/select", tags=["models"])
+    async def select_model(payload: ModelSelectRequest, request: Request) -> dict[str, object]:
+        """Persist the model choice; the next request loads it."""
+
+        state_manager: ModelManager = request.app.state.model_manager
+        model = await run_in_threadpool(state_manager.select, payload.model)
+        return {"selected": model["id"], "model": model}
+
+    @app.get("/api/models/{model_id}/download", tags=["models"])
+    def download_model(model_id: str, request: Request) -> StreamingResponse:
+        """Download (if needed) and warm up one model, streaming progress as SSE."""
+
+        state_manager: ModelManager = request.app.state.model_manager
+        catalog_entry(model_id)  # 422 invalid_model before the stream starts
+        state_manager.select(model_id)
+
+        def event_stream():
+            for event in state_manager.download_events(model_id):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.post("/api/subtitles", tags=["recognition"])
+    def subtitles(payload: SubtitleRequest) -> Response:
+        """Format recognised segments as SRT, WebVTT or plain text."""
+
+        segments = [segment.model_dump() for segment in payload.segments]
+        try:
+            content = build_subtitles(segments, payload.format, payload.text)
+        except ValueError as exc:
+            raise BadRequestError(str(exc), code="invalid_format", stage="request") from exc
+        return Response(
+            content=content,
+            media_type=MEDIA_TYPES[payload.format],
+            headers={
+                "Content-Disposition": f'attachment; filename="transcript.{payload.format}"',
+                "Cache-Control": "no-store",
+            },
+        )
 
     # ---- bonus: streaming ------------------------------------------------
 

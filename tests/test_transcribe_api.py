@@ -100,3 +100,17 @@ def test_upload_of_stereo_44k_file_works(client):
 
     assert response.status_code == 200
     assert response.json()["duration_seconds"] == pytest.approx(1.0, abs=0.06)
+
+
+def test_word_timestamps_can_be_requested_per_request(client, fake_engine):
+    default = post_audio(client, wav_bytes(1.0), language="zh")
+    requested = client.post(
+        "/api/transcribe",
+        files={"file": ("clip.wav", wav_bytes(1.0), "audio/wav")},
+        data={"language": "zh", "word_timestamps": "true"},
+    )
+
+    assert default.status_code == 200
+    assert requested.status_code == 200
+    assert fake_engine.word_timestamp_requests == [None, True]
+    assert requested.json()["segments"][0]["words"]

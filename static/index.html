@@ -49,12 +49,38 @@
             自动检测 <span class="tag tag--bonus">加分</span>
           </button>
         </div>
+        <div class="option-row">
+          <label class="checkbox">
+            <input type="checkbox" id="word-timestamps" />
+            词级时间戳（更慢约 2 倍，用于精细字幕）
+          </label>
+        </div>
       </article>
 
-      <!-- 2. Recording -->
+      <!-- 2. Model -->
       <article class="card">
         <div class="card__head">
-          <h2><span class="step">2</span>麦克风录音</h2>
+          <h2><span class="step">2</span>识别模型</h2>
+          <span class="card__hint" id="model-hint">切换模型无需重启服务</span>
+        </div>
+        <div class="model-row">
+          <select id="model-select" class="select" aria-label="识别模型">
+            <option value="small">读取模型列表…</option>
+          </select>
+          <button class="btn btn--secondary btn--small" id="model-apply" type="button" disabled>
+            应用并加载
+          </button>
+        </div>
+        <div class="progress" id="model-progress-track" hidden>
+          <span class="progress__bar" id="model-progress-bar"></span>
+        </div>
+        <p class="fineprint model-status" id="model-status">正在读取模型列表…</p>
+      </article>
+
+      <!-- 3. Recording -->
+      <article class="card">
+        <div class="card__head">
+          <h2><span class="step">3</span>麦克风录音</h2>
           <span class="card__hint" id="record-limit">单次最长 60 秒</span>
         </div>
 
@@ -91,10 +117,10 @@
         </div>
       </article>
 
-      <!-- 3. Upload -->
+      <!-- 4. Upload -->
       <article class="card">
         <div class="card__head">
-          <h2><span class="step">3</span>上传音频文件</h2>
+          <h2><span class="step">4</span>上传音频文件</h2>
           <span class="card__hint" id="upload-limit">支持 WAV / WebM / OGG / OPUS / MP3 / M4A / FLAC，最大 10 MB</span>
         </div>
 
@@ -120,10 +146,10 @@
         </div>
       </article>
 
-      <!-- 4. Result -->
+      <!-- 5. Result -->
       <article class="card card--result">
         <div class="card__head">
-          <h2><span class="step">4</span>识别结果</h2>
+          <h2><span class="step">5</span>识别结果</h2>
           <span class="card__hint" id="result-hint">停止录音或上传文件后自动开始识别</span>
         </div>
 
@@ -134,11 +160,24 @@
           <span>模型<strong id="meta-model">—</strong></span>
         </div>
 
+        <audio id="audio-player" class="audio-player" controls preload="metadata" hidden></audio>
+
         <textarea id="result-text" class="result-text" readonly
                   placeholder="识别完成后，文字会显示在这里…" spellcheck="false"></textarea>
 
+        <div class="segment-panel" id="segment-panel" hidden>
+          <div class="segment-panel__head">
+            <span>分段文本</span>
+            <span class="segment-panel__hint">点击时间可跳转播放</span>
+          </div>
+          <ol class="segment-list" id="segment-list"></ol>
+        </div>
+
         <div class="result-actions">
           <button class="btn btn--secondary" id="copy-button" type="button" disabled>复制文本</button>
+          <button class="btn btn--ghost btn--small" id="export-txt" type="button" disabled>导出 TXT</button>
+          <button class="btn btn--ghost btn--small" id="export-srt" type="button" disabled>导出 SRT</button>
+          <button class="btn btn--ghost btn--small" id="export-vtt" type="button" disabled>导出 VTT</button>
           <button class="btn btn--ghost" id="clear-button" type="button">清空</button>
           <span class="copy-feedback" id="copy-feedback" role="status"></span>
         </div>
@@ -172,8 +211,10 @@
         <div class="card__head"><h2>说明</h2></div>
         <ul class="tips">
           <li>音频全部在本机处理，模型推理在本地运行，不上传云端。</li>
+          <li>可在「识别模型」卡片切换档位（tiny / base / small / medium / large-v3-turbo），切换后无需重启服务。</li>
           <li>实时识别按约 <span id="tip-chunk">2.5</span> 秒切片发送到后端；停止后会对整段音频再复核一次，生成最终文本。</li>
           <li>录音上限 <span id="tip-limit">60</span> 秒；文件上限 <span id="tip-file-limit">10 MB</span>。</li>
+          <li>识别结果可导出 TXT / SRT / VTT，分段列表点击时间可跳转播放。</li>
           <li>识别接口：<code>POST /api/transcribe</code>，健康检查：<code>GET /health</code>。</li>
         </ul>
       </article>

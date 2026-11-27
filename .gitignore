@@ -26,6 +26,7 @@ logs/
 # ---- Assessment brief and delivery documents: local only, never published ----
 /task.md
 /docs/
+/project/
 
 # ---- Editors / OS ----
 .idea/

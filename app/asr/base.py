@@ -15,12 +15,23 @@ import numpy as np
 
 
 @dataclass(frozen=True)
+class Word:
+    """A single timed word inside a segment."""
+
+    word: str
+    start: float
+    end: float
+    probability: float | None = None
+
+
+@dataclass(frozen=True)
 class TranscriptionSegment:
     """One timed segment produced by the model."""
 
     start: float
     end: float
     text: str
+    words: tuple[Word, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -31,7 +42,11 @@ class TranscriptionResult:
     language: str
     detected_language: str | None = None
     language_probability: float | None = None
-    segments: Sequence[TranscriptionSegment] = field(default_factory=tuple)
+    segments: Sequence[TranscriptionSegment] = ()
+    #: Model identifier that actually produced this result (may be a fallback).
+    model: str | None = None
+    #: True when the request deadline stopped decoding before the audio ended.
+    truncated: bool = False
 
 
 @runtime_checkable
@@ -45,6 +60,9 @@ class ASREngine(Protocol):
         samples: np.ndarray,
         sample_rate: int,
         language: str | None,
+        *,
+        deadline: float | None = None,
+        word_timestamps: bool | None = None,
     ) -> TranscriptionResult:
         """Recognise *samples* (mono float32 in ``[-1, 1]``).
 
@@ -52,6 +70,10 @@ class ASREngine(Protocol):
             samples: 1-D mono audio.
             sample_rate: Sample rate of *samples* in Hz.
             language: ``"zh"``, ``"en"`` or ``None`` to auto-detect.
+            deadline: Optional ``time.perf_counter()`` value. Engines should stop
+                decoding once it is reached and flag the result as truncated.
+            word_timestamps: Per-request override for word-level timings; ``None``
+                keeps the configured default.
         """
 
     def status(self) -> dict[str, object]:
